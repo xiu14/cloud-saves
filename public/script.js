@@ -13,6 +13,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const authStatus = document.getElementById('auth-status');
     const repoUrlInput = document.getElementById('repo-url');
     const githubTokenInput = document.getElementById('github-token');
+    const providerSelect = document.getElementById('provider-select');
+    const giteeUsernameGroup = document.getElementById('gitee-username-group');
+    const giteeUsernameInput = document.getElementById('gitee-username');
     const displayNameInput = document.getElementById('display-name');
     const branchInput = document.getElementById('branch-input');
     const configureBtn = document.getElementById('configure-btn');
@@ -197,13 +200,18 @@ document.addEventListener('DOMContentLoaded', function() {
             if (config.display_name) displayNameInput.value = config.display_name;
             if (config.branch) branchInput.value = config.branch;
             
+            // Provider/UI sync
+            if (config.provider) providerSelect.value = config.provider;
+            // Toggle Gitee-specific fields
+            toggleProviderUI(providerSelect.value);
+
             // --- Token Input Handling ---
-            initialConfigHasToken = config.has_github_token; // 记录初始状态
+            initialConfigHasToken = config.has_access_token; // 记录初始状态
             if (initialConfigHasToken) {
                 githubTokenInput.placeholder = "访问令牌已保存"; // 设置提示
                 githubTokenInput.value = ""; // 确保实际值为空
             } else {
-                githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx"; // 默认提示
+                githubTokenInput.placeholder = providerSelect.value === 'github' ? "例如: ghp_xxxxxxxxxxxx" : "例如: gitee 个人令牌"; // 默认提示
                 githubTokenInput.value = "";
             }
             // --- End Token Input Handling ---
@@ -250,7 +258,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 githubTokenInput.value = "";
             } else {
                 // Edge case: Authorized but somehow no token? Should not happen.
-                githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx";
+                githubTokenInput.placeholder = providerSelect.value === 'github' ? "例如: ghp_xxxxxxxxxxxx" : "例如: gitee 个人令牌";
                 githubTokenInput.value = "";
             }
         } else {
@@ -268,10 +276,22 @@ document.addEventListener('DOMContentLoaded', function() {
                 githubTokenInput.value = "";
             } else {
                  // No token configured, show default prompt
-                githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx";
+                githubTokenInput.placeholder = providerSelect.value === 'github' ? "例如: ghp_xxxxxxxxxxxx" : "例如: gitee 个人令牌";
                 githubTokenInput.value = "";
             }
             // NOTE: DO NOT reset initialConfigHasToken here. It reflects backend state.
+        }
+    }
+
+    // Provider UI behavior
+    function toggleProviderUI(provider) {
+        const tokenDocsLink = document.getElementById('token-docs-link');
+        if (provider === 'gitee') {
+            giteeUsernameGroup.style.display = '';
+            if (tokenDocsLink) tokenDocsLink.href = 'https://gitee.com/personal_access_tokens';
+        } else {
+            giteeUsernameGroup.style.display = 'none';
+            if (tokenDocsLink) tokenDocsLink.href = 'https://github.com/settings/tokens';
         }
     }
 
@@ -910,12 +930,17 @@ document.addEventListener('DOMContentLoaded', function() {
         const token = githubTokenInput.value.trim();
         const displayName = displayNameInput.value.trim();
         const branch = branchInput.value.trim() || 'main';
+        const provider = providerSelect.value;
+        const giteeUsername = giteeUsernameInput ? giteeUsernameInput.value.trim() : '';
 
         try {
             showLoading('正在保存配置...');
             const result = await apiCall('config', 'POST', {
                 repo_url: repoUrl,
-                github_token: token, // 发送实际输入值 (可能是空)
+                access_token: token, // 新字段（后端兼容）
+                github_token: token, // 兼容旧后端字段
+                provider: provider,
+                auth_username: provider === 'gitee' ? giteeUsername : '',
                 display_name: displayName,
                 branch: branch
                 // 注意：这里不发送 is_authorized, autoSave* 等字段，避免意外修改
@@ -932,7 +957,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     githubTokenInput.value = ""; // 清空输入框的值
                 } else if (!token && !initialConfigHasToken) {
                     // 如果用户没输入 token，且原本就没有 token，保持原样
-                    githubTokenInput.placeholder = "例如: ghp_xxxxxxxxxxxx";
+                    githubTokenInput.placeholder = providerSelect.value === 'github' ? "例如: ghp_xxxxxxxxxxxx" : "例如: gitee 个人令牌";
                     githubTokenInput.value = "";
                 } else if (!token && initialConfigHasToken) {
                     // 如果用户没输入 token，但原本有 token，恢复 placeholder
@@ -971,9 +996,11 @@ document.addEventListener('DOMContentLoaded', function() {
             // 调用 /config 接口保存所有配置 (后端会根据新配置重启定时器)
             const result = await apiCall('config', 'POST', {
                 repo_url: repoUrlInput.value.trim(),
-                github_token: githubTokenInput.value.trim(), // 注意：这里如果为空或******，可能导致token被清空
+                access_token: githubTokenInput.value.trim(),
                 display_name: displayNameInput.value.trim(),
                 branch: branchInput.value.trim() || 'main',
+                provider: providerSelect.value,
+                auth_username: providerSelect.value === 'gitee' ? (giteeUsernameInput ? giteeUsernameInput.value.trim() : '') : '',
                 autoSaveEnabled: enabled,
                 autoSaveInterval: interval,
                 autoSaveTargetTag: targetTag
@@ -1052,6 +1079,13 @@ document.addEventListener('DOMContentLoaded', function() {
         );
     }, 'init-repo-btn');
     safeAddEventListener(configureBtn, 'click', saveConfiguration, 'configure-btn');
+    safeAddEventListener(providerSelect, 'change', () => {
+        toggleProviderUI(providerSelect.value);
+        // Update placeholder when switching provider
+        if (!initialConfigHasToken) {
+            githubTokenInput.placeholder = providerSelect.value === 'github' ? '例如: ghp_xxxxxxxxxxxx' : '例如: gitee 个人令牌';
+        }
+    }, 'provider-select');
     safeAddEventListener(authorizeBtn, 'click', async () => {
         const repoUrl = repoUrlInput.value.trim();
         const tokenInputValue = githubTokenInput.value.trim(); // 读取当前输入框的值

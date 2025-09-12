@@ -51,7 +51,13 @@ const DEFAULT_CONFIG = {
     repo_url: '',
     branch: DEFAULT_BRANCH,
     username: '',
+    // Generic token field with legacy fallback
+    access_token: '',
     github_token: '',
+    // Provider support: github | gitee
+    provider: 'github',
+    // Optional for Gitee; if empty, we try to infer from repo URL owner
+    auth_username: '',
     display_name: '',
     is_authorized: false,
     last_save: null,
@@ -73,6 +79,15 @@ async function readConfig() {
         config.autoSaveEnabled = config.autoSaveEnabled === undefined ? DEFAULT_CONFIG.autoSaveEnabled : config.autoSaveEnabled;
         config.autoSaveInterval = config.autoSaveInterval === undefined ? DEFAULT_CONFIG.autoSaveInterval : config.autoSaveInterval;
         config.autoSaveTargetTag = config.autoSaveTargetTag === undefined ? DEFAULT_CONFIG.autoSaveTargetTag : config.autoSaveTargetTag;
+        // Migration/normalization: prefer access_token; fallback to legacy github_token
+        if (!config.access_token && config.github_token) {
+            config.access_token = config.github_token;
+        }
+        // Detect provider if missing using repo URL
+        if (!config.provider) {
+            config.provider = (config.repo_url && config.repo_url.includes('gitee.com')) ? 'gitee' : 'github';
+        }
+        if (config.auth_username === undefined) config.auth_username = '';
         return config;
     } catch (error) {
         console.warn('Failed to read or parse config, creating default:', error.message);
@@ -85,6 +100,45 @@ async function saveConfig(config) {
     await fs.writeFile(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
+// Helper: detect provider from explicit value or repo URL
+function detectProvider(repoUrl, explicitProvider) {
+    if (explicitProvider) return explicitProvider;
+    try {
+        const u = new URL(repoUrl);
+        if (u.hostname.includes('gitee.com')) return 'gitee';
+    } catch (e) { /* ignore */ }
+    return 'github';
+}
+
+// Helper: extract owner from a standard hosted HTTPS repo URL
+function getOwnerFromRepoUrl(repoUrl) {
+    try {
+        const u = new URL(repoUrl);
+        const parts = u.pathname.replace(/^\/+/, '').split('/');
+        if (parts.length >= 1) return parts[0];
+    } catch (e) { /* ignore */ }
+    return '';
+}
+
+// Helper: build authenticated remote URL for GitHub/Gitee over HTTPS
+function buildAuthenticatedRemoteUrl(repoUrl, token, provider, authUsername) {
+    if (!repoUrl || !token) return repoUrl;
+    if (!repoUrl.startsWith('https://')) return repoUrl;
+    if (repoUrl.includes('@')) return repoUrl; // already embedded
+
+    const resolvedProvider = detectProvider(repoUrl, provider);
+    const encodedToken = encodeURIComponent(token);
+
+    if (resolvedProvider === 'gitee') {
+        const username = authUsername || getOwnerFromRepoUrl(repoUrl) || 'oauth2';
+        const encodedUser = encodeURIComponent(username);
+        return repoUrl.replace('https://', `https://${encodedUser}:${encodedToken}@`);
+    }
+
+    // default github format uses x-access-token as username
+    return repoUrl.replace('https://', `https://x-access-token:${encodedToken}@`);
+}
+
 async function getGitInstance(cwd = DATA_DIR) {
     const options = {
         baseDir: cwd,
@@ -94,16 +148,14 @@ async function getGitInstance(cwd = DATA_DIR) {
     const git = simpleGit(options);
     const config = await readConfig();
 
-    if (cwd === DATA_DIR && config.repo_url && config.github_token) {
+    // Determine effective token (access_token preferred; fallback to github_token)
+    const effectiveToken = config.access_token || config.github_token;
+    if (cwd === DATA_DIR && config.repo_url && effectiveToken) {
         try {
             const remotes = await git.getRemotes(true);
             const origin = remotes.find(r => r.name === 'origin');
             const originalUrl = config.repo_url;
-            let authUrl = originalUrl;
-
-            if (originalUrl.startsWith('https://') && !originalUrl.includes('@')) {
-                authUrl = originalUrl.replace('https://', `https://x-access-token:${config.github_token}@`);
-            }
+            const authUrl = buildAuthenticatedRemoteUrl(originalUrl, effectiveToken, config.provider, config.auth_username);
             if (origin && origin.refs.push !== authUrl) {
                  console.log(`[cloud-saves] Configuring remote 'origin' with auth URL for ${path.basename(cwd)}`);
                  await git.remote(['set-url', 'origin', authUrl]);
@@ -361,8 +413,9 @@ async function configureRemote(repoUrl) {
         
         let authUrl = repoUrl;
         const config = await readConfig();
-        if (repoUrl.startsWith('https://') && config.github_token && !repoUrl.includes('@')) {
-            authUrl = repoUrl.replace('https://', `https://x-access-token:${config.github_token}@`);
+        const effectiveToken = config.access_token || config.github_token;
+        if (effectiveToken) {
+            authUrl = buildAuthenticatedRemoteUrl(repoUrl, effectiveToken, config.provider, config.auth_username);
         }
 
         if (origin) {
@@ -1112,10 +1165,12 @@ async function init(router) {
                     branch: config.branch || DEFAULT_BRANCH,
                     is_authorized: config.is_authorized || false,
                     username: config.username || null,
+                    provider: config.provider || 'github',
+                    auth_username: config.auth_username || '',
                     autoSaveEnabled: config.autoSaveEnabled || false,
                     autoSaveInterval: config.autoSaveInterval || 30,
                     autoSaveTargetTag: config.autoSaveTargetTag || '',
-                    has_github_token: !!config.github_token,
+                    has_access_token: !!(config.access_token || config.github_token),
                 };
                 // console.log('[cloud-saves][DEBUG] Sending GET /config response:', JSON.stringify(safeConfig));
                 res.json(safeConfig);
@@ -1127,18 +1182,25 @@ async function init(router) {
         router.post('/config', async (req, res) => {
             try {
                 const {
-                    repo_url, github_token, display_name, branch, is_authorized,
+                    repo_url, access_token, github_token, provider, auth_username, display_name, branch, is_authorized,
                     autoSaveEnabled, autoSaveInterval, autoSaveTargetTag
                 } = req.body;
                 let currentConfig = await readConfig();
                 // DEBUG: console.log('[cloud-saves][DEBUG] Received POST /config request body:', JSON.stringify(req.body, (key, value) => key === 'github_token' && value ? '******' : value)); // Mask token in log
 
                 currentConfig.repo_url = repo_url !== undefined ? repo_url.trim() : currentConfig.repo_url;
-                if (github_token) {
-                    // DEBUG: console.log('[cloud-saves][DEBUG] Saving new GitHub token (length:', github_token.length, ')');
+                // Token precedence: access_token > github_token
+                if (access_token) {
+                    currentConfig.access_token = access_token;
+                } else if (github_token) {
                     currentConfig.github_token = github_token;
-                } else {
-                    // DEBUG: console.log('[cloud-saves][DEBUG] No new GitHub token provided in POST /config request.');
+                    if (!currentConfig.access_token) currentConfig.access_token = github_token;
+                }
+                if (provider) {
+                    currentConfig.provider = provider === 'gitee' ? 'gitee' : 'github';
+                }
+                if (auth_username !== undefined) {
+                    currentConfig.auth_username = auth_username.trim();
                 }
                 currentConfig.display_name = display_name !== undefined ? display_name.trim() : currentConfig.display_name;
                 currentConfig.branch = branch !== undefined ? (branch.trim() || DEFAULT_BRANCH) : currentConfig.branch;
@@ -1170,6 +1232,8 @@ async function init(router) {
                     branch: currentConfig.branch,
                     is_authorized: currentConfig.is_authorized,
                     username: currentConfig.username,
+                    provider: currentConfig.provider,
+                    auth_username: currentConfig.auth_username,
                     autoSaveEnabled: currentConfig.autoSaveEnabled,
                     autoSaveInterval: currentConfig.autoSaveInterval,
                     autoSaveTargetTag: currentConfig.autoSaveTargetTag
@@ -1189,8 +1253,9 @@ async function init(router) {
                 let config = await readConfig();
                 const targetBranch = branch || config.branch || DEFAULT_BRANCH;
 
-                if (!config.repo_url || !config.github_token) {
-                    return res.status(400).json({ success: false, message: '仓库URL和GitHub Token未配置，请先保存设置' });
+                const effectiveToken = config.access_token || config.github_token;
+                if (!config.repo_url || !effectiveToken) {
+                    return res.status(400).json({ success: false, message: '仓库URL和访问令牌未配置，请先保存设置' });
                 }
 
                 if (branch && config.branch !== targetBranch) {
@@ -1234,10 +1299,7 @@ async function init(router) {
                       console.log('[cloud-saves] 初始提交时无更改 (捕获异常)。');
                  }
 
-                let authUrl = config.repo_url;
-                if (config.repo_url.startsWith('https://') && !config.repo_url.includes('@')) {
-                    authUrl = config.repo_url.replace('https://', `https://x-access-token:${config.github_token}@`);
-                }
+                let authUrl = buildAuthenticatedRemoteUrl(config.repo_url, effectiveToken, config.provider, config.auth_username);
                 const remotes = await authGit.getRemotes(true);
                 const origin = remotes.find(r => r.name === 'origin');
                 if (origin) {
@@ -1304,17 +1366,29 @@ async function init(router) {
                 config.branch = targetBranch;
 
                 try {
-                    const validationResponse = await fetch('https://api.github.com/user', {
-                        headers: { 'Authorization': `token ${config.github_token}` }
-                    });
-                    if (validationResponse.ok) {
-                        const userData = await validationResponse.json();
-                        config.username = userData.login || null;
+                    const provider = detectProvider(config.repo_url, config.provider);
+                    if (provider === 'gitee') {
+                        const resp = await fetch(`https://gitee.com/api/v5/user?access_token=${encodeURIComponent(effectiveToken)}`);
+                        if (resp && resp.ok) {
+                            const userData = await resp.json();
+                            config.username = userData.login || config.username || null;
+                            if (!config.auth_username && config.username) config.auth_username = config.username;
+                        } else {
+                            console.warn(`[cloud-saves] 获取Gitee用户名失败: ${resp ? resp.status : 'no response'}`);
+                        }
                     } else {
-                        console.warn(`[cloud-saves] 获取GitHub用户名失败: ${validationResponse.status}`);
+                        const validationResponse = await fetch('https://api.github.com/user', {
+                            headers: { 'Authorization': `token ${effectiveToken}` }
+                        });
+                        if (validationResponse.ok) {
+                            const userData = await validationResponse.json();
+                            config.username = userData.login || null;
+                        } else {
+                            console.warn(`[cloud-saves] 获取GitHub用户名失败: ${validationResponse.status}`);
+                        }
                     }
                 } catch (fetchUserError) {
-                    console.warn('[cloud-saves] 获取GitHub用户名时发生网络错误:', fetchUserError.message);
+                    console.warn('[cloud-saves] 获取用户信息时发生网络错误:', fetchUserError.message);
                 }
 
                 await saveConfig(config);
@@ -1326,6 +1400,8 @@ async function init(router) {
                     branch: config.branch,
                     is_authorized: config.is_authorized,
                     username: config.username,
+                    provider: config.provider,
+                    auth_username: config.auth_username,
                     autoSaveEnabled: config.autoSaveEnabled,
                     autoSaveInterval: config.autoSaveInterval,
                     autoSaveTargetTag: config.autoSaveTargetTag
@@ -1618,10 +1694,11 @@ async function init(router) {
 
                 if (config.repo_url) {
                     console.log(`[cloud-saves] 配置远程仓库 (强制): ${config.repo_url}`);
+                    const effectiveToken = config.access_token || config.github_token;
                     let authUrl = config.repo_url;
-                     if (config.github_token && authUrl.startsWith('https://') && !authUrl.includes('@')) {
-                         authUrl = config.repo_url.replace('https://', `https://x-access-token:${config.github_token}@`);
-                     }
+                    if (effectiveToken) {
+                        authUrl = buildAuthenticatedRemoteUrl(config.repo_url, effectiveToken, config.provider, config.auth_username);
+                    }
                      try {
                           try { await git.removeRemote('origin'); } catch(e) {/*ignore*/}
                           await git.addRemote('origin', authUrl);

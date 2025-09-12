@@ -235,9 +235,17 @@
             <div class="card-body">
                 <div id="auth-form">
                     <div class="mb-3">
-                        <label for="repo-url" class="form-label">GitHub 仓库 URL</label>
+                        <label for="repo-url" class="form-label">Git 仓库 URL</label>
                         <input type="url" class="form-control mb-1" id="repo-url" placeholder="https://github.com/your-username/your-repo.git" required>
                         <small class="form-text text-muted">请确保仓库已创建且您拥有写入权限</small>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="provider-select" class="form-label">提供商</label>
+                        <select id="provider-select" class="form-select">
+                            <option value="github">GitHub</option>
+                            <option value="gitee">Gitee</option>
+                        </select>
                     </div>
 
                     <!-- 新增：分支输入框 -->
@@ -248,12 +256,18 @@
                     </div>
 
                     <div class="mb-3">
-                        <label for="github-token" class="form-label">GitHub 访问令牌</label>
-                        <input type="password" class="form-control" id="github-token" placeholder="例如: ghp_xxxxxxxxxxxx">
+                        <label for="github-token" class="form-label">访问令牌</label>
+                        <input type="password" class="form-control" id="github-token" placeholder="例如: 个人访问令牌">
                         <div class="form-text text-light">
-                            <a href="https://github.com/settings/tokens" target="_blank" class="text-info">创建令牌</a>
-                            需要具有 repo 权限
+                            <a id="token-docs-link" href="https://github.com/settings/tokens" target="_blank" class="text-info">创建令牌</a>
+                            需要具有仓库读写权限
                         </div>
+                    </div>
+
+                    <div class="mb-3" id="gitee-username-group" style="display: none;">
+                        <label for="gitee-username" class="form-label">Gitee 用户名（可选）</label>
+                        <input type="text" class="form-control" id="gitee-username" placeholder="为空则自动从仓库URL推断">
+                        <small class="form-text text-muted">用于 HTTPS 推送认证用户名。不填则使用仓库 URL 的所有者名称。</small>
                     </div>
                     <div class="mb-3">
                         <label for="display-name" class="form-label">显示名称（可选）</label>
